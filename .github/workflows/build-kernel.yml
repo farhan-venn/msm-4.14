@@ -14,12 +14,13 @@ jobs:
       - name: Setup timezone
         uses: szenius/set-timezone@master
         with:
-          timezoneLinux: "America/Sao_Paulo"
+          timezoneLinux: "Asia/Jakarta"
 
       - name: Run build script
         run: |
-          export KBUILD_BUILD_USER=nobody
-          export KBUILD_BUILD_HOST=android-build
+          export KBUILD_BUILD_USER=fnxfs
+          export KBUILD_BUILD_HOST=Raven
+          ZIPNAME="FSociety-surya-$(date '+%Y%m%d-%H%M').zip"
           source build.sh
           echo "ZIPNAME=${ZIPNAME}" >> $GITHUB_ENV
 
@@ -28,9 +29,33 @@ jobs:
 
       - name: Git variables
         run: |
-          HEAD="$(git rev-parse HEAD)"
-          HEAD_COMMIT="https://github.com/rd-stuffs/msm-4.14/commit/$HEAD"
+          HEAD=$(git rev-parse HEAD)
+          HEAD_COMMIT="https://github.com/farhan-venn/msm-4.14/commit/$HEAD"
+          COMMIT_POINT=$(git log --pretty=format:'%h : %s' -1)
           echo "HEAD_COMMIT=${HEAD_COMMIT}" >> $GITHUB_ENV
+          echo "COMMIT_POINT=${COMMIT_POINT}" >> $GITHUB_ENV
+
+      - name: Get compiler info
+        run: |
+          TC_DIR="$(pwd)/tc/clang-neutron"
+          COMPILER=$(${TC_DIR}/bin/clang --version | head -n 1 | awk -F'(' '{print $1}')
+          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
+
+      - name: Get system info
+        run: |
+          RAM_INFO=$(free -m)
+          TOTAL_RAM=$(echo "$RAM_INFO" | awk '/^Mem:/{print $2}')
+          TOTAL_RAM_GB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_RAM/1024}")
+          echo "TOTAL_RAM_GB=${TOTAL_RAM_GB}" >> $GITHUB_ENV
+
+          PROCS=$(nproc --all)
+          echo "PROCS=${PROCS}" >> $GITHUB_ENV
+
+          CPU_NAME="$(lscpu | sed -nr '/Model name/ s/.*:\s*(.*) */\1/p')"
+          echo "CPU_NAME=${CPU_NAME}" >> $GITHUB_ENV
+
+          DISTRO=$(source /etc/os-release && echo ${NAME})
+          echo "DISTRO=${DISTRO}" >> $GITHUB_ENV
 
       - name: Upload build artifact
         uses: actions/upload-artifact@main
@@ -38,13 +63,31 @@ jobs:
           name: my-artifact
           path: ${{ env.ZIPNAME }}
 
+      - name: Notify to Telegram
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+          BUILD_DATE: ${{ env.BUILD_DATE }}
+          COMMIT_POINT: ${{ env.COMMIT_POINT }}
+          COMPILER: ${{ env.COMPILER }}
+          TOTAL_RAM_GB: ${{ env.TOTAL_RAM_GB }}
+          PROCS: ${{ env.PROCS }}
+          CPU_NAME: ${{ env.CPU_NAME }}
+          DISTRO: ${{ env.DISTRO }}
+        run: |
+          if [[ "${{ env.STATUS }}" == "success" ]]; then
+            STATUS="Building Kernel <b>Success ✅</b>"
+          else
+            STATUS="Building Kernel <b>Failure ❌</b>"
+          fi
+          curl --request POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d parse_mode="HTML" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="📝 Status: $STATUS%0A📝 Kernel: <b>${{ env.ZIPNAME }}</b>%0A📝 Build Date: $BUILD_DATE%0A📝 Compiler: $COMPILER%0A📝 Branch: ${{ github.ref_name }}%0A💬 Commit: <code>${COMMIT_POINT}</code>%0A%0Aℹ️ System Info:%0A🖥️ Distro: <code>${DISTRO}</code>%0A💾 RAM: <code>${TOTAL_RAM_GB} GB</code>%0A🧠 CPU: <code>${CPU_NAME}</code>%0A🔧 Cores: <code>${PROCS} core(s)</code>"
+
       - name: Upload to Telegram
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           document: ${{ env.ZIPNAME }}
-          message: |
-             ${{ env.BUILD_DATE }}
-             
-             ${{ env.HEAD_COMMIT }}
