@@ -1,26 +1,28 @@
 name: Build Kernel
 
 on:
-  push:
+  push: # Alur kerja ini akan berjalan setiap kali ada push ke repositori
 
 jobs:
   build:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout
+      - name: Checkout Source Code
         uses: actions/checkout@main
 
-      - name: Setup timezone
+      - name: Setup Timezone
         uses: szenius/set-timezone@master
         with:
-          timezoneLinux: "America/Sao_Paulo"
+          timezoneLinux: "Asia/Jakarta"
 
+      # --- Langkah Pembangunan Kernel ---
       - name: Run standard build script
         run: |
           export KBUILD_BUILD_USER=nobody
           export KBUILD_BUILD_HOST=android-build
           source build.sh
+          # Menyimpan nama file zip ke environment agar bisa diakses di langkah selanjutnya
           echo "ZIPNAME=${ZIPNAME}" >> $GITHUB_ENV
 
       - name: Run KSU build script
@@ -28,37 +30,95 @@ jobs:
           export KBUILD_BUILD_USER=nobody
           export KBUILD_BUILD_HOST=android-build
           source build.sh --su
+          # Menyimpan nama file zip KSU ke environment
           echo "ZIPNAME_KSU=${ZIPNAME}" >> $GITHUB_ENV
 
+      # --- Mengumpulkan Informasi Build ---
+      - name: Get build information
+        run: |
+          # Informasi Waktu dan Git
+          echo "BUILD_DATE=$(date '+%H:%M, %d %B %Y')" >> $GITHUB_ENV
+          HEAD=$(git rev-parse HEAD)
+          echo "HEAD_COMMIT=https://github.com/${{ github.repository }}/commit/$HEAD" >> $GITHUB_ENV
+          echo "COMMIT_POINT=$(git log --pretty=format:'%h : %s' -1)" >> $GITHUB_ENV
+          
+          # Informasi Compiler
+          TC_DIR="$(pwd)/tc/clang-neutron"
+          if [ -d "$TC_DIR" ]; then
+            COMPILER=$(${TC_DIR}/bin/clang --version | head -n 1 | awk -F'(' '{print $1}')
+          else
+            COMPILER="N/A"
+          fi
+          echo "COMPILER=${COMPILER}" >> $GITHUB_ENV
+          
+          # Informasi Sistem Runner
+          TOTAL_RAM_GB=$(awk "BEGIN {printf \"%.0f\", $(free -m | awk '/^Mem:/{print $2}')/1024}")
+          echo "TOTAL_RAM_GB=${TOTAL_RAM_GB}" >> $GITHUB_ENV
+          echo "PROCS=$(nproc --all)" >> $GITHUB_ENV
+          echo "CPU_NAME=$(lscpu | sed -nr '/Model name/ s/.*:\s*(.*) */\1/p')" >> $GITHUB_ENV
+          echo "DISTRO=$(source /etc/os-release && echo ${NAME})" >> $GITHUB_ENV
+
+      # --- Upload Artefak ke GitHub Actions ---
       - name: Upload standard artifact
         uses: actions/upload-artifact@main
         with:
-          name: standard-artifact
+          name: standard-build
           path: ${{ env.ZIPNAME }}
 
       - name: Upload KSU artifact
         uses: actions/upload-artifact@main
         with:
-          name: KSU-artifact
+          name: ksu-build
           path: ${{ env.ZIPNAME_KSU }}
 
-      - name: Create Telegram caption
+      # --- Notifikasi ke Telegram ---
+      - name: Send status notification to Telegram
+        # Selalu berjalan, baik build sukses maupun gagal
+        if: always()
         run: |
-          BUILD_DATE="$(date '+%H:%M %d/%m/%Y')"
-          HEAD="$(git rev-parse HEAD)"
-          HEAD_COMMIT="https://github.com/rd-stuffs/msm-4.14/commit/$HEAD"
-          echo -e "${BUILD_DATE}\n\n${HEAD_COMMIT}" > caption.txt
+          if [[ "${{ job.status }}" == "success" ]]; then
+            STATUS_MESSAGE="✅ <b>Build Kernel Success</b>"
+          else
+            STATUS_MESSAGE="❌ <b>Build Kernel Failure</b>"
+          fi
+          
+          # Membuat pesan yang terformat dengan baik
+          MESSAGE="
+          ${STATUS_MESSAGE}
+          
+          <b>Branch:</b> ${{ github.ref_name }}
+          <b>Commit:</b> <a href=\"${{ env.HEAD_COMMIT }}\"><code>${{ env.COMMIT_POINT }}</code></a>
+          
+          <b>Build Info:</b>
+          - <b>Date:</b> ${{ env.BUILD_DATE }}
+          - <b>Compiler:</b> <code>${{ env.COMPILER }}</code>
+          
+          <b>Runner Info:</b>
+          - <b>OS:</b> <code>${{ env.DISTRO }}</code>
+          - <b>CPU:</b> <code>${{ env.PROCS }} core(s) | ${{ env.CPU_NAME }}</code>
+          - <b>RAM:</b> <code>${{ env.TOTAL_RAM_GB}} GB</code>
+          "
+          
+          # Mengirim pesan menggunakan curl
+          curl --request POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            --data parse_mode="HTML" \
+            --data chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            --data text="${MESSAGE}" \
+            --data disable_web_page_preview="true"
 
-      - name: Upload standard build to Telegram
-        run: |
-          caption=$(<caption.txt)
-          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
-          -F chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-          -F document=@"${{ env.ZIPNAME }}" \
-          -F caption="${caption}"
-
-      - name: Upload KSU build to Telegram
-        run: |
-          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
-          -F chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-          -F document=@"${{ env.ZIPNAME_KSU }}"
+      # --- Upload Hasil Build ke Telegram ---
+      - name: Upload builds to Telegram
+        # Hanya berjalan jika build sukses
+        if: success()
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          document: |
+            ${{ env.ZIPNAME }}
+            ${{ env.ZIPNAME_KSU }}
+          caption: |
+            <b>Standard & KSU Build</b>
+            Branch: ${{ github.ref_name }}
+            Commit: <code>${{ env.COMMIT_POINT }}</code>
+          format: html
